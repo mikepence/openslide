@@ -1940,11 +1940,11 @@ static bool hamamatsu_vms_vmu_open(openslide_t *osr, const char *filename,
   // make sure values are within known bounds
   num_layers = g_key_file_get_integer(key_file, groupname, KEY_NUM_LAYERS,
 				      NULL);
-  if (num_layers < 1) {
+  /*if (num_layers < 1) {
     g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
                 "Cannot handle Hamamatsu files with NoLayers < 1");
     goto DONE;
-  }
+  }*/
 
   // add properties
   add_properties(osr, key_file, groupname);
