@@ -260,6 +260,65 @@ static const struct _openslide_ops ventana_ops = {
   .destroy = destroy,
 };
 
+static bool ventana_tif_detect(const char *filename G_GNUC_UNUSED,
+                         struct _openslide_tifflike *tl, GError **err) {                            
+    // ensure we have a TIFF
+    if (!tl) {
+      g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
+                  "Not a TIFF file");
+      return false;
+    }
+
+    // find the TIFF directory for level 0
+    int64_t dir_count = _openslide_tifflike_get_directory_count(tl);
+    int64_t dir;
+    for (dir = 0; dir < dir_count; dir++) {
+      const char *image_desc =
+        _openslide_tifflike_get_buffer(tl, dir, TIFFTAG_IMAGEDESCRIPTION, NULL);
+      if (image_desc && strstr(image_desc, LEVEL0_IMAGEDESCRIPTION_MAGIC)) {
+        // found it
+        break;
+      }
+    }
+	
+    if (dir == dir_count) {
+      g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
+                  "Not a Ventana TIFF file");
+      return false;
+    }
+
+    // read XMLPacket
+    const char *xml = _openslide_tifflike_get_buffer(tl, 0, TIFFTAG_XMLPACKET,
+                                                     err);
+
+    if (!xml) {	
+      return false;
+    }
+
+    // check for plausible XML string before parsing
+    if (!strstr(xml, LEVEL0_XML_MAGIC)) {
+      g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
+                  "%s not in XMLPacket", LEVEL0_XML_MAGIC);
+      return false;
+    }
+	
+    // parse
+    xmlDoc *doc = _openslide_xml_parse(xml, err);
+    if (!doc) {
+      return false;
+    }
+	xmlFreeDoc(doc);
+
+    // check xml not present in TIFF directory level=0 (is it suficient?)
+    xml = _openslide_tifflike_get_buffer(tl, dir, TIFFTAG_XMLPACKET,
+                                                     err);
+	if (xml) {
+        g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
+                    "Not a Ventana TIFF file");
+	}														 													 
+    return true;
+}
+	
 static bool ventana_detect(const char *filename G_GNUC_UNUSED,
                            struct _openslide_tifflike *tl,
                            GError **err) {
@@ -347,6 +406,51 @@ static int width_compare(gconstpointer a, gconstpointer b) {
   } else {
     return 1;
   }
+}
+
+static bool process_tif_iscan_metadata(openslide_t *osr, xmlXPathContext *ctx,
+	                                   GError **err) {
+   // get node
+   xmlNode *iscan =
+     _openslide_xml_xpath_get_node(ctx, "/iScan");
+   if (!iscan) {
+     g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
+                 "Missing or duplicate iScan element");
+     goto FAIL;
+   }
+
+   // we don't know how to handle multiple Z layers
+   int64_t z_layers;
+   PARSE_INT_ATTRIBUTE_OR_FAIL(iscan, ATTR_Z_LAYERS, z_layers);   
+   if (z_layers != 1) {
+     g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
+                 "Slides with multiple Z layers are not supported");
+     goto FAIL;
+   }
+
+   // copy all iScan attributes to vendor properties
+   for (xmlAttr *attr = iscan->properties; attr; attr = attr->next) {
+     xmlChar *value = xmlGetNoNsProp(iscan, attr->name);
+     if (value && *value) {		 
+       g_hash_table_insert(osr->properties,
+                           g_strdup_printf("ventana.%s", attr->name),
+                           g_strdup((char *) value));
+     }
+     xmlFree(value);
+   }
+
+   // set standard properties
+   _openslide_duplicate_int_prop(osr, "ventana.Magnification",
+                                 OPENSLIDE_PROPERTY_NAME_OBJECTIVE_POWER);
+   _openslide_duplicate_double_prop(osr, "ventana.ScanRes",
+                                    OPENSLIDE_PROPERTY_NAME_MPP_X);
+   _openslide_duplicate_double_prop(osr, "ventana.ScanRes",
+                                    OPENSLIDE_PROPERTY_NAME_MPP_Y);
+
+   return true;
+
+ FAIL:
+   return false;											 
 }
 
 static bool process_iscan_metadata(openslide_t *osr, xmlXPathContext *ctx,
@@ -721,6 +825,292 @@ static struct _openslide_grid *create_grid(openslide_t *osr,
   return grid;
 }
 
+//from vendor generic
+static bool read_tile(openslide_t *osr,
+                      cairo_t *cr,
+                      struct _openslide_level *level,
+                      int64_t tile_col, int64_t tile_row,
+                      void *arg,
+                      GError **err) {
+  struct level *l = (struct level *) level;
+  struct _openslide_tiff_level *tiffl = &l->tiffl;
+  TIFF *tiff = arg;
+
+  // tile size
+  int64_t tw = tiffl->tile_w;
+  int64_t th = tiffl->tile_h;
+
+  // cache
+  struct _openslide_cache_entry *cache_entry;
+  uint32_t *tiledata = _openslide_cache_get(osr->cache,
+                                            level, tile_col, tile_row,
+                                            &cache_entry);
+  if (!tiledata) {
+    tiledata = g_slice_alloc(tw * th * 4);
+    if (!_openslide_tiff_read_tile(tiffl, tiff,
+                                   tiledata, tile_col, tile_row,
+                                   err)) {
+      g_slice_free1(tw * th * 4, tiledata);
+      return false;
+    }
+
+    // clip, if necessary
+    if (!_openslide_tiff_clip_tile(tiffl, tiledata,
+                                   tile_col, tile_row,
+                                   err)) {
+      g_slice_free1(tw * th * 4, tiledata);
+      return false;
+    }
+
+    // put it in the cache
+    _openslide_cache_put(osr->cache, level, tile_col, tile_row,
+                         tiledata, tw * th * 4,
+                         &cache_entry);
+  }
+
+  // draw it
+  cairo_surface_t *surface = cairo_image_surface_create_for_data((unsigned char *) tiledata,
+                                                                 CAIRO_FORMAT_ARGB32,
+                                                                 tw, th,
+                                                                 tw * 4);
+  cairo_set_source_surface(cr, surface, 0, 0);
+  cairo_surface_destroy(surface);
+  cairo_paint(cr);
+
+  // done with the cache entry, release it
+  _openslide_cache_entry_unref(cache_entry);
+
+  return true;
+}
+
+
+static bool ventana_tif_open(openslide_t *osr, const char *filename,
+                         struct _openslide_tifflike *tl,
+                         struct _openslide_hash *quickhash1, GError **err) {
+  GPtrArray *level_array = g_ptr_array_new();
+  struct slide_info *slide = NULL;
+
+  // open TIFF
+  struct _openslide_tiffcache *tc = _openslide_tiffcache_create(filename);
+  TIFF *tiff = _openslide_tiffcache_get(tc, err);
+  if (!tiff) {
+    goto FAIL;
+  }
+
+  // walk directories
+  int64_t next_level = 0;
+  double prev_magnification = INFINITY;
+  double level0_magnification = 0;
+  do {
+    tdir_t dir = TIFFCurrentDirectory(tiff);
+
+    // read ImageDescription
+    char *image_desc;
+    if (!TIFFGetField(tiff, TIFFTAG_IMAGEDESCRIPTION, &image_desc)) {
+      continue;
+    }
+	
+	
+	if (strstr(image_desc, MACRO_DESCRIPTION2)) {        		
+        const char *xml =
+          _openslide_tifflike_get_buffer(tl, dir, TIFFTAG_XMLPACKET, err);
+        if (!xml) {
+          goto FAIL;
+        }
+		
+	    // parse
+	    xmlDoc *doc = _openslide_xml_parse(xml, err);
+	    if (!doc) {
+	      goto FAIL;
+	    }
+	    xmlXPathContext* ctx = _openslide_xml_xpath_create(doc);
+
+	    // read iScan element
+	    if (!process_tif_iscan_metadata(osr, ctx, err)) {
+	 	   goto FAIL;
+	    }
+	}
+
+    if (strstr(image_desc, LEVEL_DESCRIPTION_TOKEN)) {
+      // is a level
+
+      // parse description
+      int64_t level;
+      double magnification;
+      if (!parse_level_info(image_desc, &level, &magnification, err)) {
+        goto FAIL;
+      }
+
+      // verify that levels and magnifications are properly ordered
+      if (level != next_level++) {
+        g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
+                    "Unexpected encounter with level %"G_GINT64_FORMAT, level);
+        goto FAIL;
+      }
+      if (magnification >= prev_magnification) {
+        g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
+                    "Unexpected magnification in level %"G_GINT64_FORMAT,
+                    level);
+        goto FAIL;
+      }
+      prev_magnification = magnification;
+
+      // compute downsample
+      if (level == 0) {
+        level0_magnification = magnification;
+      }
+      double downsample = level0_magnification / magnification;
+
+      // if first level, parse tile info
+      /*if (level == 0) {
+        // get tile size
+        struct _openslide_tiff_level tiffl;
+        if (!_openslide_tiff_level_init(tiff, dir, NULL, &tiffl, err)) {
+          goto FAIL;
+        }
+        // get XML
+        const char *xml =
+          _openslide_tifflike_get_buffer(tl, dir, TIFFTAG_XMLPACKET, err);
+        if (!xml) {
+          goto FAIL;
+        }
+        // parse
+        slide = parse_level0_xml(osr, xml, tiffl.tile_w, tiffl.tile_h, err);
+        if (!slide) {
+          goto FAIL;
+        }
+      }*/
+
+      // confirm that this directory is tiled
+      if (!TIFFIsTiled(tiff)) {
+        g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
+                    "Directory %d is not tiled", dir);
+        goto FAIL;
+      }
+
+      // verify that we can read this compression (hard fail if not)
+      uint16_t compression;
+      if (!TIFFGetField(tiff, TIFFTAG_COMPRESSION, &compression)) {
+        g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
+                    "Can't read compression scheme");
+        goto FAIL;
+      };
+      if (!TIFFIsCODECConfigured(compression)) {
+        g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
+                    "Unsupported TIFF compression: %u", compression);
+        goto FAIL;
+      }
+
+      // create level
+      struct level *l = g_slice_new0(struct level);
+      struct _openslide_tiff_level *tiffl = &l->tiffl;
+      if (!_openslide_tiff_level_init(tiff, dir,
+                                      NULL, tiffl,
+                                      err)) {
+        g_slice_free(struct level, l);
+        goto FAIL;
+      }
+      struct level *level0 = l;
+      if (level > 0) {
+        level0 = level_array->pdata[0];
+      }
+      l->base.downsample = downsample;
+      l->grid = _openslide_grid_create_simple(osr,
+                                              tiffl->tiles_across,
+                                              tiffl->tiles_down,
+                                              tiffl->tile_w,
+                                              tiffl->tile_h,
+                                              read_tile);
+      // the format doesn't seem to record the level size, so make it
+      // large enough for all the pixels
+      double x, y, w, h;
+      //_openslide_grid_get_bounds(l->grid, &x, &y, &w, &h);
+      l->base.w = l->tiffl.image_w;
+      l->base.h = l->tiffl.image_h;
+      //g_debug("level %"G_GINT64_FORMAT": magnification %g, downsample %g, size %"G_GINT64_FORMAT" %"G_GINT64_FORMAT, level, magnification, downsample, l->base.w, l->base.h);
+
+      // add to array
+      g_ptr_array_add(level_array, l);
+
+      // verify consistent tile sizes
+      // our math is all based on level 0 tile sizes, but
+      // _openslide_tiff_read_tile() uses the directory's tile size
+      if (l->tiffl.tile_w != level0->tiffl.tile_w ||
+          l->tiffl.tile_h != level0->tiffl.tile_h) {
+        g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
+                    "Inconsistent TIFF tile sizes");
+        goto FAIL;
+      }
+
+    } else if (!strcmp(image_desc, MACRO_DESCRIPTION) ||
+               !strcmp(image_desc, MACRO_DESCRIPTION2)) {
+      // macro image
+      if (!_openslide_tiff_add_associated_image(osr, "macro", tc, dir,
+                                                err)) {
+	goto FAIL;
+      }    
+    }
+  } while (TIFFReadDirectory(tiff));
+
+  // free slide info
+  slide_info_free(slide);
+  slide = NULL;
+
+  // sort tiled levels
+  g_ptr_array_sort(level_array, width_compare);
+
+  // set hash and properties
+  g_assert(level_array->len > 0);
+  struct level *top_level = level_array->pdata[level_array->len - 1];
+  struct level *level0 = level_array->pdata[0];
+  if (!_openslide_tifflike_init_properties_and_hash(osr, tl, quickhash1,
+                                                    top_level->tiffl.dir,
+                                                    level0->tiffl.dir,
+                                                    err)) {
+    goto FAIL;
+  }
+
+  // unwrap level array
+  int32_t level_count = level_array->len;
+  struct level **levels =
+    (struct level **) g_ptr_array_free(level_array, false);
+  level_array = NULL;
+
+  // allocate private data
+  struct ventana_ops_data *data = g_slice_new0(struct ventana_ops_data);
+
+  // store osr data
+  g_assert(osr->data == NULL);
+  g_assert(osr->levels == NULL);
+  osr->levels = (struct _openslide_level **) levels;
+  osr->level_count = level_count;
+  osr->data = data;
+  osr->ops = &ventana_ops;
+
+  // put TIFF handle and store tiffcache reference
+  _openslide_tiffcache_put(tc, tiff);
+  data->tc = tc;
+
+  return true;
+
+FAIL:
+  // free slide info
+  slide_info_free(slide);
+  // free the level array
+  if (level_array) {
+    for (uint32_t n = 0; n < level_array->len; n++) {
+      struct level *l = level_array->pdata[n];
+      _openslide_grid_destroy(l->grid);
+      g_slice_free(struct level, l);
+    }
+    g_ptr_array_free(level_array, true);
+  }
+  // free TIFF
+  _openslide_tiffcache_put(tc, tiff);
+  _openslide_tiffcache_destroy(tc);
+  return false;
+}
+
 static bool ventana_open(openslide_t *osr, const char *filename,
                          struct _openslide_tifflike *tl,
                          struct _openslide_hash *quickhash1, GError **err) {
@@ -936,4 +1326,11 @@ const struct _openslide_format _openslide_format_ventana = {
   .vendor = "ventana",
   .detect = ventana_detect,
   .open = ventana_open,
+};
+
+const struct _openslide_format _openslide_format_ventana_tif = {
+  .name = "ventana tif",
+  .vendor = "ventana",
+  .detect = ventana_tif_detect,
+  .open = ventana_tif_open,
 };
