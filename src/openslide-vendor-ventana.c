@@ -411,13 +411,18 @@ static int width_compare(gconstpointer a, gconstpointer b) {
 static bool process_tif_iscan_metadata(openslide_t *osr, xmlXPathContext *ctx,
 	                                   GError **err) {
    // get node
+   
    xmlNode *iscan =
      _openslide_xml_xpath_get_node(ctx, "/iScan");
    if (!iscan) {
-     g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
+     iscan = _openslide_xml_xpath_get_node(ctx, "/Metadata/iScan");	
+     if (!iscan) {
+	g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
                  "Missing or duplicate iScan element");
-     goto FAIL;
+     	goto FAIL;
+      }
    }
+
 
    // we don't know how to handle multiple Z layers
    int64_t z_layers;
