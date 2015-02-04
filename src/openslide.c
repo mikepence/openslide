@@ -34,7 +34,7 @@
 #include "openslide-cairo.h"
 #include "openslide-error.h"
 
-const char _openslide_release_info[] = "OpenSlide " SUFFIXED_VERSION ", copyright (C) 2007-2014 Carnegie Mellon University and others.\nLicensed under the GNU Lesser General Public License, version 2.1.";
+const char _openslide_release_info[] = "OpenSlide " SUFFIXED_VERSION ", copyright (C) 2007-2015 Carnegie Mellon University and others.\nLicensed under the GNU Lesser General Public License, version 2.1.";
 
 static const char * const EMPTY_STRING_ARRAY[] = { NULL };
 
@@ -46,6 +46,7 @@ static const struct _openslide_format *formats[] = {
   &_openslide_format_trestle,
   &_openslide_format_aperio,
   &_openslide_format_leica,
+  &_openslide_format_philips,
   &_openslide_format_ventana,
   &_openslide_format_ventana_tif,
   &_openslide_format_generic_tiff,
@@ -303,16 +304,16 @@ openslide_t *openslide_open(const char *filename) {
   g_hash_table_insert(osr->properties,
 		      g_strdup(_OPENSLIDE_PROPERTY_NAME_LEVEL_COUNT),
 		      g_strdup_printf("%d", osr->level_count));
-  bool should_have_geometry;
+  bool should_have_geometry = false;  // initialize for gcc 4.4
   for (int32_t i = 0; i < osr->level_count; i++) {
     struct _openslide_level *l = osr->levels[i];
 
     g_hash_table_insert(osr->properties,
 			g_strdup_printf(_OPENSLIDE_PROPERTY_NAME_TEMPLATE_LEVEL_WIDTH, i),
-			g_strdup_printf("%" G_GINT64_FORMAT, l->w));
+			g_strdup_printf("%"PRId64, l->w));
     g_hash_table_insert(osr->properties,
 			g_strdup_printf(_OPENSLIDE_PROPERTY_NAME_TEMPLATE_LEVEL_HEIGHT, i),
-			g_strdup_printf("%" G_GINT64_FORMAT, l->h));
+			g_strdup_printf("%"PRId64, l->h));
     g_hash_table_insert(osr->properties,
 			g_strdup_printf(_OPENSLIDE_PROPERTY_NAME_TEMPLATE_LEVEL_DOWNSAMPLE, i),
 			_openslide_format_double(l->downsample));
@@ -328,10 +329,10 @@ openslide_t *openslide_open(const char *filename) {
     if (have_geometry) {
       g_hash_table_insert(osr->properties,
                           g_strdup_printf(_OPENSLIDE_PROPERTY_NAME_TEMPLATE_LEVEL_TILE_WIDTH, i),
-                          g_strdup_printf("%" G_GINT64_FORMAT, l->tile_w));
+                          g_strdup_printf("%"PRId64, l->tile_w));
       g_hash_table_insert(osr->properties,
                           g_strdup_printf(_OPENSLIDE_PROPERTY_NAME_TEMPLATE_LEVEL_TILE_HEIGHT, i),
-                          g_strdup_printf("%" G_GINT64_FORMAT, l->tile_h));
+                          g_strdup_printf("%"PRId64, l->tile_h));
     }
   }
 
@@ -540,9 +541,9 @@ static bool read_region(openslide_t *osr,
 static bool ensure_nonnegative_dimensions(openslide_t *osr, int64_t w, int64_t h) {
   if (w < 0 || h < 0) {
     GError *tmp_err = g_error_new(OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
-                                  "negative width "
-                                  "(%"G_GINT64_FORMAT") or negative height "
-                                  "(%"G_GINT64_FORMAT") not allowed", w, h);
+                                  "negative width (%"PRId64") "
+                                  "or negative height (%"PRId64") "
+                                  "not allowed", w, h);
     _openslide_propagate_error(osr, tmp_err);
     return false;
   }

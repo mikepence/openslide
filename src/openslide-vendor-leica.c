@@ -42,7 +42,8 @@
 #include <libxml/tree.h>
 #include <libxml/xpath.h>
 
-static const char LEICA_XMLNS[] = "http://www.leica-microsystems.com/scn/2010/10/01";
+static const char LEICA_XMLNS_1[] = "http://www.leica-microsystems.com/scn/2010/03/10";
+static const char LEICA_XMLNS_2[] = "http://www.leica-microsystems.com/scn/2010/10/01";
 static const char LEICA_ATTR_SIZE_X[] = "sizeX";
 static const char LEICA_ATTR_SIZE_Y[] = "sizeY";
 static const char LEICA_ATTR_OFFSET_X[] = "offsetX";
@@ -67,7 +68,7 @@ struct leica_ops_data {
 
 struct level {
   struct _openslide_level base;
-  double clicks_per_pixel;
+  double nm_per_pixel;
   GPtrArray *areas;
 };
 
@@ -89,8 +90,8 @@ struct read_tile_args {
 struct collection {
   char *barcode;
 
-  int64_t clicks_across;
-  int64_t clicks_down;
+  int64_t nm_across;
+  int64_t nm_down;
 
   GPtrArray *images;
 };
@@ -106,10 +107,10 @@ struct image {
   char *aperture;
 
   bool is_macro;
-  int64_t clicks_across;
-  int64_t clicks_down;
-  int64_t clicks_offset_x;
-  int64_t clicks_offset_y;
+  int64_t nm_across;
+  int64_t nm_down;
+  int64_t nm_offset_x;
+  int64_t nm_offset_y;
 
   GPtrArray *dimensions;
 };
@@ -118,7 +119,7 @@ struct dimension {
   int64_t dir;
   int64_t width;
   int64_t height;
-  double clicks_per_pixel;
+  double nm_per_pixel;
 };
 
 static void destroy_level(struct level *l) {
@@ -127,6 +128,7 @@ static void destroy_level(struct level *l) {
     _openslide_grid_destroy(area->grid);
     g_slice_free(struct area, area);
   }
+  g_ptr_array_free(l->areas, true);
   g_slice_free(struct level, l);
 }
 
@@ -262,7 +264,8 @@ static bool leica_detect(const char *filename G_GNUC_UNUSED,
   if (!image_desc) {
     return false;
   }
-  if (!strstr(image_desc, LEICA_XMLNS)) {
+  if (!strstr(image_desc, LEICA_XMLNS_1) &&
+      !strstr(image_desc, LEICA_XMLNS_2)) {
     g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
                 "Not a Leica slide");
     return false;
@@ -275,7 +278,8 @@ static bool leica_detect(const char *filename G_GNUC_UNUSED,
   }
 
   // check default namespace
-  if (!_openslide_xml_has_default_namespace(doc, LEICA_XMLNS)) {
+  if (!_openslide_xml_has_default_namespace(doc, LEICA_XMLNS_1) &&
+      !_openslide_xml_has_default_namespace(doc, LEICA_XMLNS_2)) {
     g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
                 "Unexpected XML namespace");
     xmlFreeDoc(doc);
@@ -339,8 +343,8 @@ static void set_resolution_prop(openslide_t *osr, TIFF *tiff,
   }
 }
 
-static void set_bounds_props(openslide_t *osr,
-                             struct level *level0) {
+static void set_region_bounds_props(openslide_t *osr,
+                                    struct level *level0) {
   int64_t x0 = INT64_MAX;
   int64_t y0 = INT64_MAX;
   int64_t x1 = INT64_MIN;
@@ -349,6 +353,18 @@ static void set_bounds_props(openslide_t *osr,
   g_assert(level0->areas->len);
   for (uint32_t n = 0; n < level0->areas->len; n++) {
     struct area *area = level0->areas->pdata[n];
+    g_hash_table_insert(osr->properties,
+                        g_strdup_printf(_OPENSLIDE_PROPERTY_NAME_TEMPLATE_REGION_X, n),
+                        g_strdup_printf("%"PRId64, area->offset_x));
+    g_hash_table_insert(osr->properties,
+                        g_strdup_printf(_OPENSLIDE_PROPERTY_NAME_TEMPLATE_REGION_Y, n),
+                        g_strdup_printf("%"PRId64, area->offset_y));
+    g_hash_table_insert(osr->properties,
+                        g_strdup_printf(_OPENSLIDE_PROPERTY_NAME_TEMPLATE_REGION_WIDTH, n),
+                        g_strdup_printf("%"PRId64, area->tiffl.image_w));
+    g_hash_table_insert(osr->properties,
+                        g_strdup_printf(_OPENSLIDE_PROPERTY_NAME_TEMPLATE_REGION_HEIGHT, n),
+                        g_strdup_printf("%"PRId64, area->tiffl.image_h));
     x0 = MIN(x0, area->offset_x);
     y0 = MIN(y0, area->offset_y);
     x1 = MAX(x1, area->offset_x + area->tiffl.image_w);
@@ -357,16 +373,16 @@ static void set_bounds_props(openslide_t *osr,
 
   g_hash_table_insert(osr->properties,
                       g_strdup(OPENSLIDE_PROPERTY_NAME_BOUNDS_X),
-                      g_strdup_printf("%"G_GINT64_FORMAT, x0));
+                      g_strdup_printf("%"PRId64, x0));
   g_hash_table_insert(osr->properties,
                       g_strdup(OPENSLIDE_PROPERTY_NAME_BOUNDS_Y),
-                      g_strdup_printf("%"G_GINT64_FORMAT, y0));
+                      g_strdup_printf("%"PRId64, y0));
   g_hash_table_insert(osr->properties,
                       g_strdup(OPENSLIDE_PROPERTY_NAME_BOUNDS_WIDTH),
-                      g_strdup_printf("%"G_GINT64_FORMAT, x1 - x0));
+                      g_strdup_printf("%"PRId64, x1 - x0));
   g_hash_table_insert(osr->properties,
                       g_strdup(OPENSLIDE_PROPERTY_NAME_BOUNDS_HEIGHT),
-                      g_strdup_printf("%"G_GINT64_FORMAT, y1 - y0));
+                      g_strdup_printf("%"PRId64, y1 - y0));
 }
 
 static struct collection *parse_xml_description(const char *xml,
@@ -390,7 +406,7 @@ static struct collection *parse_xml_description(const char *xml,
   /*
     scn (root node)
       collection
-        barcode
+        barcode		(2010/10/01 namespace only)
         image
           dimension
           dimension
@@ -412,12 +428,17 @@ static struct collection *parse_xml_description(const char *xml,
   collection = g_slice_new0(struct collection);
   collection->images = g_ptr_array_new();
 
+  // Get barcode as stored in 2010/10/01 namespace
   collection->barcode = _openslide_xml_xpath_get_string(ctx, "/d:scn/d:collection/d:barcode/text()");
+  if (!collection->barcode) {
+    // Fall back to 2010/03/10 namespace
+    collection->barcode = _openslide_xml_xpath_get_string(ctx, "/d:scn/d:collection/@barcode");
+  }
 
   PARSE_INT_ATTRIBUTE_OR_FAIL(collection_node, LEICA_ATTR_SIZE_X,
-                              collection->clicks_across);
+                              collection->nm_across);
   PARSE_INT_ATTRIBUTE_OR_FAIL(collection_node, LEICA_ATTR_SIZE_Y,
-                              collection->clicks_down);
+                              collection->nm_down);
 
   // get the image nodes
   ctx->node = collection_node;
@@ -444,6 +465,7 @@ static struct collection *parse_xml_description(const char *xml,
     // create image struct
     struct image *image = g_slice_new0(struct image);
     image->dimensions = g_ptr_array_new();
+    g_ptr_array_add(collection->images, image);
 
     image->creation_date = _openslide_xml_xpath_get_string(ctx, "d:creationDate/text()");
     image->device_model = _openslide_xml_xpath_get_string(ctx, "d:device/@model");
@@ -453,18 +475,18 @@ static struct collection *parse_xml_description(const char *xml,
     image->aperture = _openslide_xml_xpath_get_string(ctx, "d:scanSettings/d:illuminationSettings/d:numericalAperture/text()");
 
     PARSE_INT_ATTRIBUTE_OR_FAIL(view, LEICA_ATTR_SIZE_X,
-                                image->clicks_across);
+                                image->nm_across);
     PARSE_INT_ATTRIBUTE_OR_FAIL(view, LEICA_ATTR_SIZE_Y,
-                                image->clicks_down);
+                                image->nm_down);
     PARSE_INT_ATTRIBUTE_OR_FAIL(view, LEICA_ATTR_OFFSET_X,
-                                image->clicks_offset_x);
+                                image->nm_offset_x);
     PARSE_INT_ATTRIBUTE_OR_FAIL(view, LEICA_ATTR_OFFSET_Y,
-                                image->clicks_offset_y);
+                                image->nm_offset_y);
 
-    image->is_macro = (image->clicks_offset_x == 0 &&
-                       image->clicks_offset_y == 0 &&
-                       image->clicks_across == collection->clicks_across &&
-                       image->clicks_down == collection->clicks_down);
+    image->is_macro = (image->nm_offset_x == 0 &&
+                       image->nm_offset_y == 0 &&
+                       image->nm_across == collection->nm_across &&
+                       image->nm_down == collection->nm_down);
 
     // get dimensions
     ctx->node = image_node;
@@ -489,6 +511,7 @@ static struct collection *parse_xml_description(const char *xml,
       xmlFree(z);
 
       struct dimension *dimension = g_slice_new0(struct dimension);
+      g_ptr_array_add(image->dimensions, dimension);
 
       PARSE_INT_ATTRIBUTE_OR_FAIL(dimension_node, LEICA_ATTR_IFD,
                                   dimension->dir);
@@ -497,19 +520,13 @@ static struct collection *parse_xml_description(const char *xml,
       PARSE_INT_ATTRIBUTE_OR_FAIL(dimension_node, LEICA_ATTR_SIZE_Y,
                                   dimension->height);
 
-      dimension->clicks_per_pixel =
-        (double) image->clicks_across / dimension->width;
-
-      g_ptr_array_add(image->dimensions, dimension);
+      dimension->nm_per_pixel = (double) image->nm_across / dimension->width;
     }
     xmlXPathFreeObject(result);
     result = NULL;
 
     // sort dimensions
     g_ptr_array_sort(image->dimensions, dimension_compare);
-
-    // add image
-    g_ptr_array_add(collection->images, image);
   }
 
   success = true;
@@ -629,23 +646,22 @@ static bool create_levels_from_collection(openslide_t *osr,
         // no level yet; create it
         l = g_slice_new0(struct level);
         l->areas = g_ptr_array_new();
-        l->clicks_per_pixel = dimension->clicks_per_pixel;
+        l->nm_per_pixel = dimension->nm_per_pixel;
         g_ptr_array_add(levels, l);
       } else {
         // get level
         g_assert(dimension_num < levels->len);
         l = levels->pdata[dimension_num];
 
-        // minimize click density
-        l->clicks_per_pixel = MIN(l->clicks_per_pixel,
-                                  dimension->clicks_per_pixel);
+        // maximize pixel density
+        l->nm_per_pixel = MIN(l->nm_per_pixel, dimension->nm_per_pixel);
 
         // verify compatible resolution, with some tolerance for rounding
         struct dimension *first_image_dimension =
           first_main_image->dimensions->pdata[dimension_num];
-        double resolution_similarity = 1 - fabs(dimension->clicks_per_pixel -
-          first_image_dimension->clicks_per_pixel) /
-          first_image_dimension->clicks_per_pixel;
+        double resolution_similarity = 1 - fabs(dimension->nm_per_pixel -
+          first_image_dimension->nm_per_pixel) /
+          first_image_dimension->nm_per_pixel;
         //g_debug("resolution similarity %g", resolution_similarity);
         if (resolution_similarity < 0.98) {
           g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
@@ -666,10 +682,10 @@ static bool create_levels_from_collection(openslide_t *osr,
         return false;
       }
 
-      // set area offset, in clicks
-      area->offset_x = image->clicks_offset_x;
-      area->offset_y = image->clicks_offset_y;
-      //g_debug("directory %"G_GINT64_FORMAT", clicks/pixel %g", dimension->dir, dimension->clicks_per_pixel);
+      // set area offset, in nm
+      area->offset_x = image->nm_offset_x;
+      area->offset_y = image->nm_offset_y;
+      //g_debug("directory %"PRId64", nm/pixel %g", dimension->dir, dimension->nm_per_pixel);
 
       // verify that we can read this compression (hard fail if not)
       uint16_t compression;
@@ -707,20 +723,20 @@ static bool create_levels_from_collection(openslide_t *osr,
     return false;
   }
 
-  // now we have minimized click densities
+  // now we have maximized pixel densities
   for (uint32_t level_num = 0; level_num < levels->len; level_num++) {
     struct level *l = levels->pdata[level_num];
 
     // set level size
-    l->base.w = ceil(collection->clicks_across / l->clicks_per_pixel);
-    l->base.h = ceil(collection->clicks_down / l->clicks_per_pixel);
-    //g_debug("level %d, clicks/pixel %g", level_num, l->clicks_per_pixel);
+    l->base.w = ceil(collection->nm_across / l->nm_per_pixel);
+    l->base.h = ceil(collection->nm_down / l->nm_per_pixel);
+    //g_debug("level %d, nm/pixel %g", level_num, l->nm_per_pixel);
 
-    // convert area offsets from clicks to pixels
+    // convert area offsets from nm to pixels
     for (uint32_t area_num = 0; area_num < l->areas->len; area_num++) {
       struct area *area = l->areas->pdata[area_num];
-      area->offset_x = area->offset_x / l->clicks_per_pixel;
-      area->offset_y = area->offset_y / l->clicks_per_pixel;
+      area->offset_x = area->offset_x / l->nm_per_pixel;
+      area->offset_y = area->offset_y / l->nm_per_pixel;
     }
   }
 
@@ -769,7 +785,7 @@ static bool create_levels_from_collection(openslide_t *osr,
     return false;
   }
 
-  //g_debug("quickhash directory %"G_GINT64_FORMAT, *quickhash_dir);
+  //g_debug("quickhash directory %"PRId64, *quickhash_dir);
   return true;
 }
 
@@ -833,8 +849,8 @@ static bool leica_open(openslide_t *osr, const char *filename,
   set_resolution_prop(osr, tiff, OPENSLIDE_PROPERTY_NAME_MPP_Y,
                       TIFFTAG_YRESOLUTION);
 
-  // set bounds properties
-  set_bounds_props(osr, level0);
+  // set region bounds properties
+  set_region_bounds_props(osr, level0);
 
   // unwrap level array
   int32_t level_count = level_array->len;

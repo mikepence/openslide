@@ -36,12 +36,12 @@
 static void profile_callback(void *arg G_GNUC_UNUSED, const char *sql,
                              sqlite3_uint64 ns) {
   uint64_t ms = ns / 1e6;
-  g_debug("%s --> %"G_GUINT64_FORMAT" ms", sql, ms);
+  g_debug("%s --> %"PRIu64" ms", sql, ms);
 }
 #endif
 
 #undef sqlite3_open_v2
-sqlite3 *_openslide_sqlite_open(const char *filename, GError **err) {
+static sqlite3 *do_open(const char *filename, int flags, GError **err) {
   sqlite3 *db;
 
   int ret = sqlite3_initialize();
@@ -51,17 +51,7 @@ sqlite3 *_openslide_sqlite_open(const char *filename, GError **err) {
     return NULL;
   }
 
-  // ":" filename prefix is reserved.
-  // "file:" prefix invokes URI filename interpretation if enabled, which
-  // might have been done globally.
-  char *path;
-  if (g_str_has_prefix(filename, ":") || g_str_has_prefix(filename, "file:")) {
-    path = g_strdup_printf("./%s", filename);
-  } else {
-    path = g_strdup(filename);
-  }
-  ret = sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, NULL);
-  g_free(path);
+  ret = sqlite3_open_v2(filename, &db, flags, NULL);
 
   if (ret) {
     if (db) {
@@ -83,6 +73,21 @@ sqlite3 *_openslide_sqlite_open(const char *filename, GError **err) {
   return db;
 }
 #define sqlite3_open_v2 _OPENSLIDE_POISON(_openslide_sqlite_open)
+
+sqlite3 *_openslide_sqlite_open(const char *filename, GError **err) {
+  // ":" filename prefix is reserved.
+  // "file:" prefix invokes URI filename interpretation if enabled, which
+  // might have been done globally.
+  char *path;
+  if (g_str_has_prefix(filename, ":") || g_str_has_prefix(filename, "file:")) {
+    path = g_strdup_printf("./%s", filename);
+  } else {
+    path = g_strdup(filename);
+  }
+  sqlite3 *db = do_open(path, SQLITE_OPEN_READONLY, err);
+  g_free(path);
+  return db;
+}
 
 sqlite3_stmt *_openslide_sqlite_prepare(sqlite3 *db, const char *sql,
                                         GError **err) {

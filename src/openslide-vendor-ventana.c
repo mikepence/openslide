@@ -318,7 +318,7 @@ static bool ventana_tif_detect(const char *filename G_GNUC_UNUSED,
 	}														 													 
     return true;
 }
-	
+
 static bool ventana_detect(const char *filename G_GNUC_UNUSED,
                            struct _openslide_tifflike *tl,
                            GError **err) {
@@ -414,9 +414,12 @@ static bool process_tif_iscan_metadata(openslide_t *osr, xmlXPathContext *ctx,
    xmlNode *iscan =
      _openslide_xml_xpath_get_node(ctx, "/iScan");
    if (!iscan) {
-     g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
+     iscan = _openslide_xml_xpath_get_node(ctx, "/Metadata/iScan");	
+     if (!iscan) {
+	g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
                  "Missing or duplicate iScan element");
-     goto FAIL;
+     	goto FAIL;
+      }
    }
 
    // we don't know how to handle multiple Z layers
@@ -507,7 +510,7 @@ static bool get_tile_coordinates(const struct area *area,
   PARSE_INT_ATTRIBUTE_OR_FAIL(joint_info, attr_name, tile);
   if (tile < 1 || tile > area->tile_count) {
     g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
-                "Tile number out of bounds: %"G_GINT64_FORMAT, tile);
+                "Tile number out of bounds: %"PRId64, tile);
     goto FAIL;
   }
 
@@ -600,16 +603,14 @@ static struct slide_info *parse_level0_xml(openslide_t *osr,
     if (tile_width != tiff_tile_width || tile_height != tiff_tile_height) {
       g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
                   "Tile size mismatch: "
-                  "expected %"G_GINT64_FORMAT"x%"G_GINT64_FORMAT", "
-                  "found %"G_GINT64_FORMAT"x%"G_GINT64_FORMAT,
+                  "expected %"PRId64"x%"PRId64", found %"PRId64"x%"PRId64,
                   tiff_tile_width, tiff_tile_height, tile_width, tile_height);
       goto FAIL;
     }
     if (start_col_x % tile_width || start_row_y % tile_height) {
       g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
                   "Area origin not divisible by tile size: "
-                  "%"G_GINT64_FORMAT" %% %"G_GINT64_FORMAT", "
-                  "%"G_GINT64_FORMAT" %% %"G_GINT64_FORMAT,
+                  "%"PRId64" %% %"PRId64", %"PRId64" %% %"PRId64,
                   start_col_x, tile_width, start_row_y, tile_height);
       goto FAIL;
     }
@@ -620,7 +621,7 @@ static struct slide_info *parse_level0_xml(openslide_t *osr,
     PARSE_INT_ATTRIBUTE_OR_FAIL(info, ATTR_NUM_COLS, area->tiles_across);
     PARSE_INT_ATTRIBUTE_OR_FAIL(info, ATTR_NUM_ROWS, area->tiles_down);
 
-    //g_debug("area %d: start %"G_GINT64_FORMAT" %"G_GINT64_FORMAT", count %"G_GINT64_FORMAT" %"G_GINT64_FORMAT, i, area->start_col, area->start_row, area->tiles_across, area->tiles_down);
+    //g_debug("area %d: start %"PRId64" %"PRId64", count %"PRId64" %"PRId64, i, area->start_col, area->start_row, area->tiles_across, area->tiles_down);
 
     // create tile structs
     area->tile_count = area->tiles_across * area->tiles_down;
@@ -657,7 +658,7 @@ static struct slide_info *parse_level0_xml(openslide_t *osr,
       struct joint *joint;
       bool ok;
       bool direction_y = false;
-      //g_debug("%s, tile1 %"G_GINT64_FORMAT" %"G_GINT64_FORMAT", tile2 %"G_GINT64_FORMAT" %"G_GINT64_FORMAT, (char *) direction, tile1_col, tile1_row, tile2_col, tile2_row);
+      //g_debug("%s, tile1 %"PRId64" %"PRId64", tile2 %"PRId64" %"PRId64, (char *) direction, tile1_col, tile1_row, tile2_col, tile2_row);
       if (!xmlStrcmp(direction, BAD_CAST DIRECTION_RIGHT)) {
         // get left joint of right tile
         struct tile *tile =
@@ -680,8 +681,7 @@ static struct slide_info *parse_level0_xml(openslide_t *osr,
       if (!ok) {
         g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
                     "Unexpected tile join: %s, "
-                    "(%"G_GINT64_FORMAT", %"G_GINT64_FORMAT"), "
-                    "(%"G_GINT64_FORMAT", %"G_GINT64_FORMAT")",
+                    "(%"PRId64", %"PRId64"), (%"PRId64", %"PRId64")",
                     (char *) direction, tile1_col, tile1_row,
                     tile2_col, tile2_row);
         xmlFree(direction);
@@ -882,7 +882,6 @@ static bool read_tile(openslide_t *osr,
 
   return true;
 }
-
 
 static bool ventana_tif_open(openslide_t *osr, const char *filename,
                          struct _openslide_tifflike *tl,
@@ -1111,6 +1110,25 @@ FAIL:
   return false;
 }
 
+static void set_region_props(openslide_t *osr, struct slide_info *slide,
+                             struct level *level0) {
+  for (int32_t i = 0; i < slide->num_areas; i++) {
+    struct area *area = slide->areas[i];
+    g_hash_table_insert(osr->properties,
+                        g_strdup_printf(_OPENSLIDE_PROPERTY_NAME_TEMPLATE_REGION_X, i),
+                        g_strdup_printf("%"PRId64, (int64_t) (slide->tile_advance_x * area->start_col)));
+    g_hash_table_insert(osr->properties,
+                        g_strdup_printf(_OPENSLIDE_PROPERTY_NAME_TEMPLATE_REGION_Y, i),
+                        g_strdup_printf("%"PRId64, (int64_t) (slide->tile_advance_y * area->start_row)));
+    g_hash_table_insert(osr->properties,
+                        g_strdup_printf(_OPENSLIDE_PROPERTY_NAME_TEMPLATE_REGION_WIDTH, i),
+                        g_strdup_printf("%"PRId64, (int64_t) ceil(slide->tile_advance_x * (area->tiles_across - 1) + level0->tiffl.tile_w)));
+    g_hash_table_insert(osr->properties,
+                        g_strdup_printf(_OPENSLIDE_PROPERTY_NAME_TEMPLATE_REGION_HEIGHT, i),
+                        g_strdup_printf("%"PRId64, (int64_t) ceil(slide->tile_advance_y * (area->tiles_down - 1) + level0->tiffl.tile_h)));
+  }
+}
+
 static bool ventana_open(openslide_t *osr, const char *filename,
                          struct _openslide_tifflike *tl,
                          struct _openslide_hash *quickhash1, GError **err) {
@@ -1150,13 +1168,12 @@ static bool ventana_open(openslide_t *osr, const char *filename,
       // verify that levels and magnifications are properly ordered
       if (level != next_level++) {
         g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
-                    "Unexpected encounter with level %"G_GINT64_FORMAT, level);
+                    "Unexpected encounter with level %"PRId64, level);
         goto FAIL;
       }
       if (magnification >= prev_magnification) {
         g_set_error(err, OPENSLIDE_ERROR, OPENSLIDE_ERROR_FAILED,
-                    "Unexpected magnification in level %"G_GINT64_FORMAT,
-                    level);
+                    "Unexpected magnification in level %"PRId64, level);
         goto FAIL;
       }
       prev_magnification = magnification;
@@ -1230,7 +1247,7 @@ static bool ventana_open(openslide_t *osr, const char *filename,
       _openslide_grid_get_bounds(l->grid, &x, &y, &w, &h);
       l->base.w = ceil(x + w);
       l->base.h = ceil(y + h);
-      //g_debug("level %"G_GINT64_FORMAT": magnification %g, downsample %g, size %"G_GINT64_FORMAT" %"G_GINT64_FORMAT, level, magnification, downsample, l->base.w, l->base.h);
+      //g_debug("level %"PRId64": magnification %g, downsample %g, size %"PRId64" %"PRId64, level, magnification, downsample, l->base.w, l->base.h);
 
       // add to array
       g_ptr_array_add(level_array, l);
@@ -1262,17 +1279,20 @@ static bool ventana_open(openslide_t *osr, const char *filename,
     }
   } while (TIFFReadDirectory(tiff));
 
+  // sort tiled levels
+  g_ptr_array_sort(level_array, width_compare);
+
+  // set region properties
+  g_assert(level_array->len > 0);
+  struct level *level0 = level_array->pdata[0];
+  set_region_props(osr, slide, level0);
+
   // free slide info
   slide_info_free(slide);
   slide = NULL;
 
-  // sort tiled levels
-  g_ptr_array_sort(level_array, width_compare);
-
-  // set hash and properties
-  g_assert(level_array->len > 0);
+  // set hash and TIFF properties
   struct level *top_level = level_array->pdata[level_array->len - 1];
-  struct level *level0 = level_array->pdata[0];
   if (!_openslide_tifflike_init_properties_and_hash(osr, tl, quickhash1,
                                                     top_level->tiffl.dir,
                                                     level0->tiffl.dir,
