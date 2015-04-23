@@ -4,6 +4,7 @@ Carnegie Mellon University and others
 
 http://openslide.org/
 
+Forked by Cytomine (http://cytomine.be/)
 
 ==========================
 
@@ -14,6 +15,8 @@ What is this?
 This library reads whole slide image files (also known as virtual slides).
 It provides a consistent and simple API for reading files from multiple
 vendors.
+
+This fork was made to add support for ventana tiff image format.
 
 
 What is the license?
@@ -142,11 +145,11 @@ Pittsburgh.
 How to build?
 =============
 
+clone this repository
+autoreconf -i
 ./configure
 make
 make install
 
-(If building from the Git repository, you will first need to install
-autoconf, automake, libtool, and pkg-config and run "autoreconf -i".)
 
 Good luck!
